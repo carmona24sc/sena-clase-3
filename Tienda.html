@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Caja Registradora • Inventario + Escáner</title>
+  <meta name="theme-color" content="#0ea5e9" />
+  <!-- TailwindCSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Icons -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0/tabler-icons.min.css" />
+  <!-- Dexie (IndexedDB) -->
+  <script src="https://unpkg.com/dexie@3.2.4/dist/dexie.min.js"></script>
+  <!-- Quagga (Barcode Scanner) -->
+  <script src="https://unpkg.com/quagga@0.12.1/dist/quagga.min.js"></script>
+  <style>
+    html, body { height: 100%; }
+    .card { @apply bg-white/90 backdrop-blur rounded-2xl shadow-xl border border-slate-200; }
+    .btn { @apply inline-flex items-center gap-2 px-4 py-2 rounded-xl shadow-sm border border-slate-200; }
+    .btn-primary { @apply bg-sky-600 text-white hover:bg-sky-700; }
+    .btn-ghost { @apply hover:bg-slate-100; }
+    .input { @apply w-full px-3 py-2 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-400; }
+    .badge { @apply text-xs px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200; }
+    .modal-backdrop { @apply fixed inset-0 bg-black/60 z-40 flex items-center justify-center; }
+    .modal { @apply bg-white w-full max-w-2xl rounded-2xl shadow-2xl overflow-hidden; }
+    .scanner { position: relative; }
+    .scanner::after { content: ""; position:absolute; left:50%; top:0; transform: translateX(-50%); width: 2px; height:100%; background: rgba(239,68,68,.7); animation: scan 2s linear infinite; }
+    @keyframes scan { 0%{top:0} 50%{top:calc(100% - 2px)} 100%{top:0} }
+  </style>
+</head>
+<body class="min-h-full bg-gradient-to-br from-sky-50 via-white to-indigo-50 text-slate-800">
+  <div class="mx-auto max-w-7xl p-4 md:p-6 lg:p-8">
+    <header class="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-6">
+      <div class="flex items-center gap-3">
+        <div class="p-2 rounded-2xl bg-sky-100 text-sky-700"><i class="ti ti-barcode"></i></div>
+        <div>
+          <h1 class="text-2xl md:text-3xl font-bold">Caja Registradora + Inventario</h1>
+          <p class="text-sm text-slate-600">Funciona 100% en el navegador (GitHub Pages). Datos guardados en tu dispositivo (IndexedDB).</p>
+        </div>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <button id="exportBtn" class="btn btn-ghost" title="Exportar a JSON"><i class="ti ti-download"></i> Exportar</button>
+        <label class="btn btn-ghost cursor-pointer" title="Importar JSON">
+          <i class="ti ti-upload"></i> Importar
+          <input id="importFile" type="file" accept="application/json" class="hidden" />
+        </label>
+        <button id="resetBtn" class="btn btn-ghost" title="Reiniciar BD"><i class="ti ti-database-off"></i> Reset</button>
+      </div>
+    </header>
+
+    <main class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+      <!-- Columna Inventario -->
+      <section class="card p-4 lg:col-span-2">
+        <div class="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-4">
+          <h2 class="text-xl font-semibold">Inventario</h2>
+          <div class="flex gap-2 w-full md:w-auto">
+            <input id="searchInput" class="input" placeholder="Buscar por nombre o código..." />
+            <button id="scanOpenBtn" class="btn btn-primary"><i class="ti ti-scan"></i> Escanear</button>
+          </div>
+        </div>
+        <div class="grid md:grid-cols-2 gap-4 mb-4">
+          <div class="space-y-2">
+            <label class="text-sm">Código de barras</label>
+            <input id="codeInput" class="input" placeholder="EAN/UPC"/>
+          </div>
+          <div class="space-y-2">
+            <label class="text-sm">Nombre</label>
+            <input id="nameInput" class="input" placeholder="Producto"/>
+          </div>
+          <div class="space-y-2">
+            <label class="text-sm">Precio (COP)</label>
+            <input id="priceInput" class="input" type="number" min="0" step="1" placeholder="0"/>
+          </div>
+          <div class="space-y-2">
+            <label class="text-sm">Stock</label>
+            <input id="stockInput" class="input" type="number" min="0" step="1" placeholder="0"/>
+          </div>
+        </div>
+        <div class="flex gap-2 mb-4">
+          <button id="addProductBtn" class="btn btn-primary"><i class="ti ti-plus"></i> Agregar/Actualizar</button>
+          <button id="clearFormBtn" class="btn"><i class="ti ti-brush"></i> Limpiar</button>
+        </div>
+
+        <div class="overflow-hidden rounded-2xl border border-slate-200">
+          <table class="min-w-full text-sm">
+            <thead class="bg-slate-50 text-slate-600">
+              <tr>
+                <th class="text-left px-3 py-2">Código</th>
+                <th class="text-left px-3 py-2">Producto</th>
+                <th class="text-right px-3 py-2">Precio</th>
+                <th class="text-right px-3 py-2">Stock</th>
+                <th class="px-3 py-2">Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="inventoryBody" class="divide-y divide-slate-100 bg-white"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Columna Venta / Carrito -->
+      <aside class="card p-4 h-fit lg:sticky lg:top-6">
+        <h2 class="text-xl font-semibold mb-3">Caja / Carrito</h2>
+        <div class="flex gap-2 mb-3">
+          <input id="cartCodeInput" class="input" placeholder="Escanee o escriba código" />
+          <input id="cartQtyInput" type="number" min="1" value="1" class="input w-24" />
+          <button id="addToCartBtn" class="btn btn-primary"><i class="ti ti-shopping-cart-plus"></i></button>
+        </div>
+        <ul id="cartList" class="space-y-2 mb-3"></ul>
+        <div class="flex items-center justify-between text-lg font-semibold mb-3">
+          <span>Total</span>
+          <span id="cartTotal">$0</span>
+        </div>
+        <div class="flex gap-2">
+          <button id="checkoutBtn" class="btn btn-primary w-full"><i class="ti ti-cash"></i> Cobrar</button>
+          <button id="clearCartBtn" class="btn w-full"><i class="ti ti-trash"></i> Vaciar</button>
+        </div>
+        <p class="text-xs text-slate-500 mt-2">El cobro descuenta del inventario y registra la venta.</p>
+      </aside>
+
+      <!-- Columna Historial de Ventas -->
+      <section class="card p-4 lg:col-span-3">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-xl font-semibold">Historial de ventas</h2>
+          <span id="salesCount" class="badge">0 ventas</span>
+        </div>
+        <div class="overflow-hidden rounded-2xl border border-slate-200">
+          <table class="min-w-full text-sm">
+            <thead class="bg-slate-50 text-slate-600">
+              <tr>
+                <th class="text-left px-3 py-2">Fecha</th>
+                <th class="text-left px-3 py-2">Detalle</th>
+                <th class="text-right px-3 py-2">Total</th>
+              </tr>
+            </thead>
+            <tbody id="salesBody" class="divide-y divide-slate-100 bg-white"></tbody>
+          </table>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Modal Escáner -->
+  <div id="scanModal" class="hidden modal-backdrop">
+    <div class="modal">
+      <div class="p-4 flex items-center justify-between border-b border-slate-200">
+        <h3 class="text-lg font-semibold">Escanear código de barras</h3>
+        <button id="scanCloseBtn" class="btn btn-ghost"><i class="ti ti-x"></i></button>
+      </div>
+      <div class="p-4 space-y-4">
+        <div class="scanner rounded-xl overflow-hidden border border-slate-200">
+          <div id="scanner" style="height: 280px; width: 100%; background:#000"></div>
+        </div>
+        <div class="flex items-center justify-between">
+          <span class="text-sm text-slate-600">Apunte la cámara al código (EAN/UPC). Si falla, pruebe luz o enfoque.</span>
+          <button id="switchCameraBtn" class="btn"><i class="ti ti-camera-rotate"></i> Cambiar cámara</button>
+        </div>
+      </div>
+      <div class="p-3 bg-slate-50 border-t border-slate-200 flex justify-end">
+        <button id="scanUseBtn" class="btn btn-primary"><i class="ti ti-check"></i> Usar código</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ===== Utilidades =====
+    const $ = (sel) => document.querySelector(sel);
+    const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+    const COP = (n) => n.toLocaleString('es-CO',{ style: 'currency', currency: 'COP' });
+
+    // ===== Base de datos (IndexedDB con Dexie) =====
+    const db = new Dexie('pos_inventario_db');
+    db.version(1).stores({
+      products: '&code, name, price, stock', // & = clave primaria
+      sales: '++id, date, total'            // ++ = autoincremental
+    });
+
+    // ===== Estado =====
+    let cart = []; // {code, name, price, qty}
+
+    // ===== Inventario UI =====
+    const codeInput = $('#codeInput');
+    const nameInput = $('#nameInput');
+    const priceInput = $('#priceInput');
+    const stockInput = $('#stockInput');
+    const inventoryBody = $('#inventoryBody');
+    const searchInput = $('#searchInput');
+
+    async function renderInventory(filter='') {
+      const all = await db.products.toArray();
+      const f = filter.trim().toLowerCase();
+      const items = f ? all.filter(p => p.name.toLowerCase().includes(f) || String(p.code).includes(f)) : all;
+      inventoryBody.innerHTML = items.map(p => `
+        <tr class="hover:bg-slate-50">
+          <td class="px-3 py-2 font-mono">${p.code}</td>
+          <td class="px-3 py-2">${p.name}</td>
+          <td class="px-3 py-2 text-right">${COP(p.price)}</td>
+          <td class="px-3 py-2 text-right">${p.stock}</td>
+          <td class="px-3 py-2 text-center">
+            <button class="btn btn-ghost text-sky-700" onclick='prefillProduct(${JSON.stringify(p).replace(/"/g,"&quot;")})'><i class="ti ti-edit"></i></button>
+            <button class="btn btn-ghost text-rose-600" onclick='deleteProduct("${p.code}")'><i class="ti ti-trash"></i></button>
+          </td>
+        </tr>`).join('');
+    }
+
+    function prefillProduct(p) {
+      codeInput.value = p.code || '';
+      nameInput.value = p.name || '';
+      priceInput.value = p.price || 0;
+      stockInput.value = p.stock || 0;
+      codeInput.focus();
+    }
+
+    async function deleteProduct(code) {
+      if (!confirm('¿Eliminar producto y su stock?')) return;
+      await db.products.delete(String(code));
+      renderInventory(searchInput.value);
+    }
+
+    $('#addProductBtn').addEventListener('click', async () => {
+      const code = (codeInput.value || '').trim();
+      const name = (nameInput.value || '').trim();
+      const price = Number(priceInput.value || 0);
+      const stock = Number(stockInput.value || 0);
+      if (!code || !name) return alert('Código y nombre son obligatorios');
+      const existing = await db.products.get(code);
+      const data = { code, name, price, stock: Math.max(0, stock) };
+      if (existing) await db.products.update(code, data); else await db.products.add(data);
+      clearForm();
+      renderInventory(searchInput.value);
+    });
+
+    function clearForm(){ codeInput.value=''; nameInput.value=''; priceInput.value=''; stockInput.value=''; }
+    $('#clearFormBtn').addEventListener('click', clearForm);
+
+    searchInput.addEventListener('input', (e)=> renderInventory(e.target.value));
+
+    // ===== Carrito =====
+    const cartList = $('#cartList');
+    const cartTotalEl = $('#cartTotal');
+    const cartCodeInput = $('#cartCodeInput');
+    const cartQtyInput = $('#cartQtyInput');
+
+    function renderCart(){
+      cartList.innerHTML = cart.map((item, idx) => `
+        <li class="flex items-center justify-between gap-2 p-2 rounded-xl border border-slate-200">
+          <div class="min-w-0">
+            <p class="font-medium truncate">${item.name}</p>
+            <p class="text-xs text-slate-500">${item.code} • ${item.qty} × ${COP(item.price)}</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <input type="number" min="1" value="${item.qty}" class="input w-20" onchange="updateQty(${idx}, this.value)" />
+            <button class="btn btn-ghost text-rose-600" onclick="removeFromCart(${idx})"><i class="ti ti-x"></i></button>
+          </div>
+        </li>`).join('');
+      const total = cart.reduce((s,i)=> s + i.qty * i.price, 0);
+      cartTotalEl.textContent = COP(total);
+    }
+
+    window.updateQty = (idx, val)=>{ cart[idx].qty = Math.max(1, Number(val||1)); renderCart(); };
+    window.removeFromCart = (idx)=>{ cart.splice(idx,1); renderCart(); };
+
+    async function addCodeToCart(code, qty){
+      code = String(code||'').trim();
+      qty = Math.max(1, Number(qty||1));
+      if (!code) return;
+      const p = await db.products.get(code);
+      if (!p) return alert('Producto no encontrado en inventario');
+      if (p.stock < qty) return alert('Stock insuficiente');
+      const existing = cart.find(i => i.code === code);
+      if (existing) existing.qty += qty; else cart.push({ code: p.code, name: p.name, price: p.price, qty });
+      renderCart();
+      cartCodeInput.value='';
+      cartQtyInput.value=1;
+      cartCodeInput.focus();
+    }
+
+    $('#addToCartBtn').addEventListener('click', ()=> addCodeToCart(cartCodeInput.value, cartQtyInput.value));
+    cartCodeInput.addEventListener('keydown', e=>{ if(e.key==='Enter') addCodeToCart(cartCodeInput.value, cartQtyInput.value); });
+
+    $('#clearCartBtn').addEventListener('click', ()=>{ cart=[]; renderCart(); });
+
+    $('#checkoutBtn').addEventListener('click', async ()=>{
+      if (cart.length===0) return alert('El carrito está vacío');
+      // Verificación de stock
+      for (const item of cart){
+        const p = await db.products.get(item.code);
+        if (!p || p.stock < item.qty) return alert(`Stock insuficiente para ${item.name}`);
+      }
+      // Descontar
+      for (const item of cart){
+        const p = await db.products.get(item.code);
+        await db.products.update(item.code, { stock: p.stock - item.qty });
+      }
+      const total = cart.reduce((s,i)=> s + i.qty * i.price, 0);
+      const detail = cart.map(i=> `${i.qty}x ${i.name}`).join(', ');
+      await db.sales.add({ date: new Date().toISOString(), total, detail });
+      cart = [];
+      renderCart();
+      renderInventory(searchInput.value);
+      renderSales();
+      alert('Venta registrada 👍');
+    });
+
+    // ===== Ventas =====
+    const salesBody = $('#salesBody');
+    const salesCount = $('#salesCount');
+
+    async function renderSales(){
+      const sales = await db.sales.orderBy('id').reverse().toArray();
+      salesCount.textContent = `${sales.length} ${sales.length===1?'venta':'ventas'}`;
+      salesBody.innerHTML = sales.map(s => `
+        <tr>
+          <td class="px-3 py-2">${new Date(s.date).toLocaleString()}</td>
+          <td class="px-3 py-2">${s.detail || ''}</td>
+          <td class="px-3 py-2 text-right">${COP(s.total)}</td>
+        </tr>`).join('');
+    }
+
+    // ===== Exportar / Importar / Reset =====
+    $('#exportBtn').addEventListener('click', async ()=>{
+      const data = {
+        products: await db.products.toArray(),
+        sales: await db.sales.toArray(),
+        exportedAt: new Date().toISOString(),
+        app: 'pos-ghpages', version: 1
+      };
+      const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `backup-pos-${new Date().toISOString().slice(0,10)}.json`;
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    });
+
+    $('#importFile').addEventListener('change', async (e)=>{
+      const file = e.target.files[0]; if (!file) return;
+      const text = await file.text();
+      try {
+        const data = JSON.parse(text);
+        if (!data.products || !data.sales) throw new Error('Formato inválido');
+        await db.transaction('rw', db.products, db.sales, async ()=>{
+          await db.products.clear();
+          await db.sales.clear();
+          await db.products.bulkAdd(data.products);
+          await db.sales.bulkAdd(data.sales);
+        });
+        renderInventory(); renderSales();
+        alert('Datos importados correctamente');
+      } catch(err){
+        alert('No se pudo importar: ' + err.message);
+      } finally { e.target.value = ''; }
+    });
+
+    $('#resetBtn').addEventListener('click', async ()=>{
+      if (!confirm('Esto borrará todo el inventario y ventas en este dispositivo. ¿Continuar?')) return;
+      await db.products.clear();
+      await db.sales.clear();
+      cart = [];
+      renderInventory(); renderSales(); renderCart();
+    });
+
+    // ===== Escáner (Quagga) =====
+    const scanModal = $('#scanModal');
+    const scanOpenBtn = $('#scanOpenBtn');
+    const scanCloseBtn = $('#scanCloseBtn');
+    const scanUseBtn = $('#scanUseBtn');
+    const switchCameraBtn = $('#switchCameraBtn');
+    let lastDetected = '';
+    let currentDeviceId = null;
+
+    function openScanModal(){
+      scanModal.classList.remove('hidden');
+      startScanner();
+    }
+    function closeScanModal(){
+      stopScanner();
+      scanModal.classList.add('hidden');
+    }
+
+    async function getCameras(){
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices.filter(d=> d.kind==='videoinput');
+    }
+
+    async function startScanner(){
+      const cameras = await getCameras();
+      if (cameras.length === 0) { alert('No se encontró cámara'); return; }
+      if (!currentDeviceId) {
+        // Preferir cámara trasera en móviles
+        const back = cameras.find(c=> /back|trase/i.test(c.label));
+        currentDeviceId = (back || cameras[0]).deviceId;
+      }
+      Quagga.init({
+        inputStream: {
+          name: 'Live', type: 'LiveStream', target: document.querySelector('#scanner'), constraints: {
+            facingMode: 'environment', deviceId: currentDeviceId ? { exact: currentDeviceId } : undefined
+          }
+        },
+        decoder: { readers: ['ean_reader','ean_8_reader','upc_reader','upc_e_reader','code_128_reader'] },
+        locate: true,
+        numOfWorkers: navigator.hardwareConcurrency ? Math.min(4, navigator.hardwareConcurrency) : 2
+      }, (err)=>{
+        if (err) { console.error(err); alert('No se pudo iniciar el escáner'); return; }
+        Quagga.start();
+      });
+
+      Quagga.onDetected((data)=>{
+        const code = data && data.codeResult && data.codeResult.code;
+        if (!code) return;
+        lastDetected = code;
+        // Destello visual
+        const el = document.querySelector('#scanner');
+        el.style.outline = '4px solid rgba(34,197,94,.8)';
+        setTimeout(()=> el.style.outline = 'none', 300);
+      });
+    }
+
+    function stopScanner(){
+      try { Quagga.stop(); Quagga.offDetected(); } catch(_){}
+    }
+
+    scanOpenBtn.addEventListener('click', openScanModal);
+    scanCloseBtn.addEventListener('click', closeScanModal);
+    switchCameraBtn.addEventListener('click', async ()=>{
+      const cams = await getCameras();
+      if (cams.length < 2) return alert('Solo hay una cámara disponible');
+      const idx = cams.findIndex(c=> c.deviceId === currentDeviceId);
+      const next = cams[(idx+1)%cams.length];
+      currentDeviceId = next.deviceId;
+      stopScanner(); startScanner();
+    });
+
+    scanUseBtn.addEventListener('click', ()=>{
+      if (!lastDetected) { alert('Aún no se detecta ningún código'); return; }
+      // Si hay foco en campo de inventario, colóquelo allí; si no, al carrito
+      const active = document.activeElement;
+      if (active === codeInput) codeInput.value = lastDetected;
+      else { cartCodeInput.value = lastDetected; cartCodeInput.focus(); }
+      closeScanModal();
+    });
+
+    // ===== Inicialización =====
+    (async function 
